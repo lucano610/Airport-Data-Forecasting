@@ -1,0 +1,258 @@
+---
+title: "Soekarno-Hatta Airport International Visitor Arrivals Analysis Using SARIMA and Holt-Winters Method"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(forecast)
+```
+
+## Introduction
+
+Tourism has become a priority sector in Indonesia's economic development. It is expected to be one of key drivers in accelerating economic growth in Indonesia. To increase the marketing activities, it is required proper planning based on quantitave as well as qualitative information on international tourism performance in the past. This paper gives an analysis of international tourist arrival number in Indonesia over a span of 10 years.
+
+## Data set
+
+The data used in this paper is based on monthly report of international visitor arrival at Soekarno-Hata international aiport by the Directoriate General of Immigration of Indonesia. The arrival data span from January 2008 to December 2017. The first six row of the raw data is shown below.
+
+```{r echo=FALSE}
+# load raw data from  file
+arrival_data <- read.csv("bps-file.csv", sep = ";")
+# delete the first two columns (no information)
+arrival_data <- arrival_data[, -c(1,2)]
+head(arrival_data)
+```
+
+To prepare the data for downstream analysis, we have to clean it according to the method we will use. We change the date format from Indonesian format to standard English format. We also have to arrange the row of our data ascending according to the year and month of arrival. The source data is contains no missing value, so data imputation is not needed. Below is the data after this process has been done.
+
+```{r include=FALSE}
+# change column names
+names(arrival_data) <- c("Year", "Month", "international_arrival", "Airport")
+# change month from bahasa to english
+month_ind <- c("Januari", "Februari", "Maret", "April", "Mei", "Juni","Juli",
+               "Agustus", "September", "Oktober", "November", "Desember")
+arrival_data$Month <- match(arrival_data$Month, month_ind)
+arrival_data$Month <- month.name[arrival_data$Month]
+# look at the head of the data
+head(arrival_data)
+```
+
+```{r message=FALSE, include=FALSE}
+# reorder the rows of dataframe according to year (ascending)
+library("dplyr")
+arrival_data <- arrange(arrival_data, Year)
+head(arrival_data)
+```
+
+```{r echo=FALSE}
+# convert matrix to time series data
+arrival_ts <- ts(data = arrival_data$international_arrival, start = c(2008, 1),
+                 frequency = 12)
+arrival_ts
+```
+
+## Results
+
+### Evaluate pattern of the data
+
+Data from January 2008 to December 2017 are plotted below. From the plot we can see that the time series data is not stationary and strongly have trend and seasonal. There is an increase in the variance of the arrival value over time, so our first step is to take logarithms of data to stabilise the variance.
+
+```{r include=FALSE}
+# plot data
+library(ggplot2)
+#plot(tourist_ts, ylab = "International arrival", 
+#     main = "Arrival at Soekarno-Hatta Airport")
+autoplot(arrival_ts) + ggtitle("Arrival at Soekarno-Hatta Airport") +
+  xlab("Time") + ylab("International arrival")
+```
+
+```{r include=FALSE}
+# take log data to stabilise variance
+log_arrival <- log(arrival_ts)
+autoplot(log_arrival) + ggtitle("Arrival at Soekarno-Hatta Airport") +
+  xlab("Time") + ylab("log(arrival)")
+```
+
+```{r echo=FALSE}
+# facetting
+dframe <- cbind("arrival" = arrival_ts, "log(arrival)" = log_arrival)
+autoplot(dframe, facet=TRUE) + ylab("Value") + 
+  ggtitle("Arrival at Soekarno-Hatta Airport") +
+  scale_x_continuous(breaks = seq(2008, 2019, by=2))
+```
+
+To confirm if there is trend and seasonality, we check the decomposition plot and performed Kwiatkowski–Phillips–Schmidt–Shin (KPSS) tests to check for stationarity. The output from KPSS test suggesting that our data are not stationary.
+
+```{r echo=FALSE}
+# decomposition plot
+#plot(decompose(tourist_ts))
+autoplot(decompose(log_arrival), range.bars = FALSE)
+```
+
+```{r echo=FALSE}
+# additional test (KPSS test)
+library(urca)
+summary(ur.kpss(log_arrival))
+```
+
+### Transformations
+
+To correct for trend pattern in the time series, we applied a difference of order 1. Furthermore, because the data is monthly, we take the seasonal period as 12 and applied difference of order 12 to the data to correct for seasonality. The output of KPSS test after this process suggesting that the difference data is stationary.
+
+```{r echo=FALSE}
+# differencing with order 1 (to remove trend)
+arrival_diff <- diff(log_arrival, differences = 1)
+arrival_diff <- diff(arrival_diff, differences = 12)
+autoplot(arrival_diff) + ylab("diff") + ggtitle("Difference Data")
+```
+
+```{r echo=FALSE}
+# kpss test for differenced data
+summary(ur.kpss(arrival_diff))
+```
+
+### Model selection: ARIMA
+
+We used Seasonal ARIMA model for this time series to get a forecast for the future values from our data. The first approach for this process is to plot ACF and PACF from our differenced data and observing the behaviour of the autocorrelation and partial autocorrelation of it. For the simplicity of our first estimation, we consider a low order model of ARMA.
+
+```{r echo=FALSE}
+library(gridExtra)
+gg_acf <- ggAcf(arrival_diff) + ggtitle("ACF of Differenced Data")
+gg_pacf <- ggPacf(arrival_diff) + ggtitle("PACF of Differenced Data")
+gridExtra::grid.arrange(gg_acf, gg_pacf, nrow = 2)
+```
+
+We can see that there is a significant spike at lag 12 in the ACF plot, confirming that the data is seasonal with period equal to 12. The decaying to zero of PACF and the significant spike at the first three lag of ACF suggests a non-seasonal MA(3) component. Looking at the lag 12 and 24, there is signitificant spike in the ACF for lag 12, but nothing at seasonal lags in the PACF. This may suggestive of a seasonal MA(1) component. Consequently, we begin with an $ARIMA(0,1,3)(0,1,1)_{12}$ model. Along with the initial model, we fit and compute AICc value of some variations on it, shown in the following table
+
+
+```{r echo=FALSE}
+# make a table of models AICc
+params <- list(
+  list( c(0,1,3), c(0,1,1) ),
+  list( c(0,1,3), c(0,1,2) ),
+  list( c(0,1,2), c(0,1,1) ),
+  list( c(1,1,2), c(0,1,1) ),
+  list( c(1,1,2), c(0,1,2) ),
+  list( c(1,1,2), c(1,1,1) ),
+  list( c(1,1,2), c(1,0,1) ),
+  list( c(1,1,3), c(1,0,1) )
+)
+
+model_name <- c()
+AICc <- c()
+
+for (x in params) {
+  model <- Arima(log_arrival, order = x[[1]], seasonal = x[[2]])
+  ord <- arimaorder(model)
+  current_model <- paste0("ARIMA(", toString(ord[c("p","d","q")]),")(",
+                          toString(ord[c("P","D","Q")]), ")[",
+                          ord["Frequency"], "]")
+  model_name <- c(model_name, current_model)
+  AICc <- c(AICc, model$aicc)
+}
+
+model_table <- data.frame("Model" = model_name, AICc)
+model_table
+```
+
+Of these modelsm the best is the $ARIMA(1,1,2)(1,0,1)_{12}$ model, since it has the smalles AICc value. The forecast of these model for the future values of next 12 months is given below
+
+```{r message=FALSE, echo=FALSE}
+# ARIMA forecast
+best_arima_model <- Arima(log_arrival, order = c(1,1,2), seasonal = c(1,0,1))
+autoplot(forecast(best_arima_model, h=12)) + ylab("log(arrival)") +
+  scale_x_continuous(breaks = seq(2008, 2019, by=2))
+```
+
+```{r}
+best_arima_model
+```
+
+```{r}
+forecast(best_arima_model, h=12)
+```
+
+
+### Model diagnostics
+
+```{r echo=FALSE}
+checkresiduals(best_arima_model)
+```
+
+The residuals from this model are shown above. There are a few significant spikes in the ACF of the residual. Checking the Ljung-Box test result, gives us a p-value of 0.1829. With this p-value, we accept the null hypothesis of Ljung-Box test that our residual data are independently distributed (i.e. the correlations in the residual data are 0). Moreover, plotting a QQ-plot of the residuals give us the following graph
+
+```{r echo=FALSE}
+ggplot() + aes(sample = as.numeric(best_arima_model$residuals)) + 
+  stat_qq() + stat_qq_line(col="blue", lwd=0.8)
+```
+
+The QQ-plot shows that most of residual points are close to the identity line, confirming that our residuals are distributed as a normal distribution (i.e. white noise).
+
+### Smoothing: Holt-Winters
+
+ARIMA is a parametric method to forecast a future value of a time series. Another way to forecast a time series is to use a non-parametric method such as Holt-Winters exponential smoothing. Forecasts produced using exponential smoothing methods are weighted averages of past observations, the more recent th observation the higher the associated weight.
+
+We performed Holt-Winters' additive method to log-transformed data since the log-transformed data have a constant variance. The forecast using this Holt-Winter's method is shown below
+
+```{r message=FALSE, echo=FALSE}
+fit_hw <- HoltWinters(log_arrival, seasonal = "additive")
+hw_forecast <- forecast(fit_hw, h=12)
+autoplot(hw_forecast) + ylab("log(arrival)") +
+  scale_x_continuous(breaks = seq(2008, 2019, by=2))
+```
+
+```{r}
+hw_forecast
+```
+
+
+### Evaluating forecast accuracy
+
+It is important to evaluate forecast accuracy of the two method mentioned above to determine more appropriate method to use for downstream analysis. To get an estimation for both method's accuracy, we separate the available data into two portions, a test set containing a full period of last seasonal data (12 data points), and a training containing the rest of data. We will train both methods on training set and compare the forecast values from both method with true values from test set.
+
+To measure the accuracy, we used Root Mean Square Error (RMSE), Mean Absolute Error (MAE) and Mean Absolute Percentage Error (MAPE) as performance measurement metrics. The table below showing the result after running the test. RMSE value from Holt-Winters forecast is slightly better than ARIMA forecast, but for MAE and MAPE, it is evidence that ARIMA model is better than Holt-Winter smoothing for this specific training and test set.
+
+```{r include=FALSE}
+test_set <- tail(log_arrival, n=12)
+training_set <- head(log_arrival, n=-12)
+```
+
+```{r include=FALSE}
+fit_hw <- HoltWinters(training_set, seasonal = "additive")
+forecast_hw <- forecast(fit_hw, h=12)
+
+HWerr <- as.numeric(test_set) - as.numeric(forecast_hw$mean)
+HWmae <- mean(abs(HWerr))
+HWrmse <- sqrt(mean(HWerr^2))
+HWmape <- mean(abs((HWerr*100)/test_set))
+```
+
+```{r include=FALSE}
+best_arima_model <- Arima(training_set, order = c(1,1,2), seasonal = c(1,0,1))
+arima_forecast <- forecast(best_arima_model, h=12)
+
+ARIMAerr = as.numeric(test_set) - as.numeric(arima_forecast$mean)
+ARIMAmae = mean(abs(ARIMAerr))
+ARIMArmse = sqrt(mean(ARIMAerr^2))
+ARIMAmape = mean(abs((ARIMAerr*100)/test_set))
+```
+
+
+```{r echo=FALSE}
+performance_measurement <- c("RMSE", "MAE", "MAPE")
+holt_winters <- c(HWrmse, HWmae, HWmape)
+arima_acc <- c(ARIMArmse, ARIMAmae, ARIMAmape)
+performance_table <- data.frame("Measurement" = performance_measurement,
+                                "Holt-Winters" = holt_winters,
+                                "ARIMA" = arima_acc)
+performance_table
+```
+
+
+## Conclusion
+
+This paper has an objective to analyze the data on number of international arrival at Soekarno-Hatta airport, Indonesia from January 2008 to December 2017 and forecast the future values. We used two methods to approach the problem. The first method is a parameteric method, ARIMA modelling. We chose the best ARIMA model by observing the behaviour of ACF and PACF of our data and from several ARIMA model candidates, we chose model with smallest AICc value. The second method is a non-parametric method, Holt-Winter smoothing. Comparison of both method for this data done using a training-test set separation. The result showed that the seasonal ARIMA model perform better for this specific data set.
